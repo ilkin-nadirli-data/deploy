@@ -189,7 +189,7 @@ st.markdown(
 st.markdown('<div class="hero-title">LearnSphere</div>', unsafe_allow_html=True)
 st.markdown('<div class="hero-subtitle">STEAM Layihəsi | Fizioloji Metabolizm, Akustik Analitika & Sessiya Keyfiyyəti</div>', unsafe_allow_html=True)
 
-# API Müştərisi (Xətasız yoxlama ilə)
+# API Müştərisi
 api_key = None
 try:
     if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
@@ -233,47 +233,52 @@ is_offline_manual = (system_mode == "🟡 Oflayn (Lokal Qaydalar)")
 st.sidebar.markdown("---")
 mode = st.sidebar.radio("Otaq Formatı:", ["👤 Fərdi Kabinə (1 nəfər)", "👥 Qrup Otağı (Çox nəfərlik)"])
 
+MEN_AVG_WEIGHT = 75
+WOMEN_AVG_WEIGHT = 62
+
 if mode == "👤 Fərdi Kabinə (1 nəfər)":
+    total_people = 1
     gender = st.sidebar.selectbox("Cins:", ["Kişi", "Qadın"])
-    weight = st.sidebar.number_input("Çəki (kq)", 40, 130, 75)
     men_count = 1 if gender == "Kişi" else 0
     women_count = 1 if gender == "Qadın" else 0
-    men_avg_weight = weight if men_count else 0
-    women_avg_weight = weight if women_count else 0
+    men_avg_weight = MEN_AVG_WEIGHT if men_count else 0
+    women_avg_weight = WOMEN_AVG_WEIGHT if women_count else 0
     default_vol = 8
 else:
-    col_m, col_w = st.sidebar.columns(2)
-    with col_m:
-        men_count = st.number_input("Kişi sayı", 0, 30, 2)
-        men_avg_weight = st.number_input("Kişi orta çəki", 40, 120, 75)
-    with col_w:
-        women_count = st.number_input("Qadın sayı", 0, 30, 2)
-        women_avg_weight = st.number_input("Qadın orta çəki", 40, 120, 60)
+    # Qrup otağında yalnız ümumi say seçilir, arxa planda bölünür
+    total_people = st.sidebar.number_input("İştirakçı Sayı", min_value=2, max_value=30, value=4, step=1)
+    men_count = math.ceil(total_people / 2)
+    women_count = total_people - men_count
+    men_avg_weight = MEN_AVG_WEIGHT
+    women_avg_weight = WOMEN_AVG_WEIGHT
     default_vol = 25
 
-total_people = max(men_count + women_count, 1)
 room_vol = st.sidebar.number_input("Otaq Həcmi (m³)", 3, 300, default_vol)
 
 st.sidebar.markdown("---")
 
 # ==============================================================
-# Google Sheets Webhook İnteqrasiyası
+# Google Sheets Webhook İnteqrasiyası (YENİ LİNK)
 # ==============================================================
-WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbwXs-JuxSohbZ2H_Fkx4zSYzy4Zhz736P-thxBrso51iGyl4MTU3nbva8lPbKpzNe0z6A/exec"
+WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbyRW0AZquTlgSM51-LR96vausUQ5_lIirM-5For6OprXfUH-CkZEbaWMwk35TTEcdLWLA/exec"
 
-def export_to_google_sheets(duration_str, focus_score, final_co2, avg_temp):
+def export_to_google_sheets(rejim, total_people, men_count, women_count, duration_str, focus_score, final_co2, avg_temp):
     payload = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "duration": duration_str,
+        "rejim": str(rejim),
+        "total_people": int(total_people),
+        "men_count": int(men_count),
+        "women_count": int(women_count),
+        "duration": str(duration_str),
         "focus_score": round(float(focus_score), 2),
         "final_co2": round(float(final_co2), 1),
         "avg_temp": round(float(avg_temp), 1)
     }
     try:
-        response = requests.post(WEBHOOK_URL, json=payload, timeout=8)
+        response = requests.post(WEBHOOK_URL, json=payload, timeout=10, allow_redirects=True)
         return response.status_code == 200
     except Exception as e:
-        print(f"Sheets göndərmə xətası: {e}")
+        print(f"Sheets xətası: {e}")
         return False
 
 # ==============================================================
@@ -393,11 +398,16 @@ else:
 
         final_score = int(max(100 - st.session_state.session_penalty, 40))
 
+        # Google Sheets-ə göndərilməsi (9 dəyər tam ardıcıllıqla)
         sheet_ok = export_to_google_sheets(
-            total_time_str,
-            final_score,
-            last_co2,
-            avg_temp
+            rejim=mode,
+            total_people=total_people,
+            men_count=men_count,
+            women_count=women_count,
+            duration_str=total_time_str,
+            focus_score=final_score,
+            final_co2=last_co2,
+            avg_temp=avg_temp
         )
 
         ai_final_feedback = get_session_summary(
@@ -635,4 +645,4 @@ else:
         </div>
         """,
         unsafe_allow_html=True
-    )
+    )    
