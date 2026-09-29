@@ -2,6 +2,7 @@ import os
 import time
 import random
 import requests
+import json
 import math
 import pandas as pd
 import streamlit as st
@@ -263,7 +264,7 @@ room_vol = st.sidebar.number_input("Otaq Həcmi (m³)", 3, 300, default_vol)
 st.sidebar.markdown("---")
 
 # ==============================================================
-# Google Sheets Webhook İnteqrasiyası
+# Google Sheets Webhook İnteqrasiyası (YENİLƏNDİ)
 # ==============================================================
 WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbyRW0AZquTlgSM51-LR96vausUQ5_lIirM-5For6OprXfUH-CkZEbaWMwk35TTEcdLWLA/exec"
 
@@ -280,8 +281,14 @@ def export_to_google_sheets(rejim, total_people, men_count, women_count, duratio
         "avg_temp": round(float(avg_temp), 1)
     }
     try:
-        response = requests.post(WEBHOOK_URL, json=payload, timeout=10, allow_redirects=True)
-        return response.status_code == 200
+        response = requests.post(
+            WEBHOOK_URL,
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+            allow_redirects=True
+        )
+        return response.status_code in [200, 302]
     except Exception as e:
         print(f"Sheets xətası: {e}")
         return False
@@ -453,7 +460,12 @@ else:
             avg_lux = int(df_final["İşıq (Lux)"].mean())
             avg_temp = round(df_final["Temperatur (°C)"].mean(), 1)
             last_co2 = df_final["CO2 (ppm)"].iloc[-1]
-            final_score = int(round(pd.Series(st.session_state.ieq_scores_history).mean()))
+            
+            # NaN xətasının qarşısını alan etibarlı hesablama
+            if st.session_state.ieq_scores_history:
+                final_score = int(round(pd.Series(st.session_state.ieq_scores_history).mean()))
+            else:
+                final_score = 100
         else:
             avg_co2 = 420
             max_db = 38
