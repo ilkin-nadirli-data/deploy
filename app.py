@@ -187,7 +187,7 @@ st.markdown(
 )
 
 st.markdown('<div class="hero-title">LearnSphere</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-subtitle">STEAM Layihəsi | Fizioloji Metabolizm, Akustik Analitika & Sessiya Keyfiyyəti</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-subtitle">STEAM Layihəsi | Elmi IEQ Modeli, Persily-de Jonge Dinamikası & Koqnitiv Erqonomika</div>', unsafe_allow_html=True)
 
 # API Müştərisi
 api_key = None
@@ -210,8 +210,8 @@ if "last_report" not in st.session_state:
     st.session_state.last_report = None
 if "data_history" not in st.session_state:
     st.session_state.data_history = []
-if "session_penalty" not in st.session_state:
-    st.session_state.session_penalty = 0.0
+if "ieq_scores_history" not in st.session_state:
+    st.session_state.ieq_scores_history = []
 
 if "trigger_timers" not in st.session_state:
     st.session_state.trigger_timers = {"co2": 0, "sound": 0, "temp": 0, "light": 0}
@@ -233,29 +233,30 @@ is_offline_manual = (system_mode == "🟡 Oflayn (Lokal Qaydalar)")
 st.sidebar.markdown("---")
 mode = st.sidebar.radio("Otaq Formatı:", ["👤 Fərdi Kabinə (1 nəfər)", "👥 Qrup Otağı (Çox nəfərlik)"])
 
-MEN_DEFAULT_WEIGHT = 75
-WOMEN_DEFAULT_WEIGHT = 60
+# Persily & de Jonge (2017) 21-30 yaş üzrə standart bədən kütləsi (kg)
+MEN_DEFAULT_WEIGHT = 84.9
+WOMEN_DEFAULT_WEIGHT = 71.9
 
 if mode == "👤 Fərdi Kabinə (1 nəfər)":
     gender = st.sidebar.selectbox("Cins:", ["Kişi", "Qadın"])
-    weight = st.sidebar.number_input("Çəki (kq)", 40, 130, 75)
+    weight = st.sidebar.number_input("Çəki (kq)", 40, 130, int(MEN_DEFAULT_WEIGHT if gender == "Kişi" else WOMEN_DEFAULT_WEIGHT))
     men_count = 1 if gender == "Kişi" else 0
     women_count = 1 if gender == "Qadın" else 0
     men_avg_weight = weight if men_count else 0
     women_avg_weight = weight if women_count else 0
     total_people = 1
-    default_vol = 8
+    default_vol = 10
 else:
     col_m, col_w = st.sidebar.columns(2)
     with col_m:
         men_count = st.number_input("Kişi sayı", 0, 30, 2)
-        men_avg_weight = st.number_input("Kişi orta çəki (kq)", 40, 120, MEN_DEFAULT_WEIGHT)
+        men_avg_weight = st.number_input("Kişi orta çəki (kq)", 40, 120, int(MEN_DEFAULT_WEIGHT))
     with col_w:
         women_count = st.number_input("Qadın sayı", 0, 30, 2)
-        women_avg_weight = st.number_input("Qadın orta çəki (kq)", 40, 120, WOMEN_DEFAULT_WEIGHT)
+        women_avg_weight = st.number_input("Qadın orta çəki (kq)", 40, 120, int(WOMEN_DEFAULT_WEIGHT))
     
     total_people = max(men_count + women_count, 1)
-    default_vol = 25
+    default_vol = 30
 
 room_vol = st.sidebar.number_input("Otaq Həcmi (m³)", 3, 300, default_vol)
 
@@ -286,35 +287,94 @@ def export_to_google_sheets(rejim, total_people, men_count, women_count, duratio
         return False
 
 # ==============================================================
-# Dinamik Bioloji Tarazlıq & Sensor Modeli
+# Elmi Əsaslı Bioloji Kütlə Balansı (Persily & de Jonge 2017)
 # ==============================================================
 def calculate_advanced_bio(men_count, men_weight, women_count, women_weight, room_volume_m3, prev_co2):
-    o2_men = (men_count * men_weight * 3.5) / 1000
-    o2_women = (women_count * women_weight * 3.2) / 1000
-    co2_rate = (o2_men + o2_women) * 0.85
+    # 1.4 met zehni fəaliyyət üçün CO2 generasiyası (L/s)
+    # Standart baza nisbəti: Kişi = 0.0056 L/s, Qadın = 0.0044 L/s
+    g_m = men_count * (0.0056 * (men_weight / MEN_DEFAULT_WEIGHT))
+    g_w = women_count * (0.0044 * (women_weight / WOMEN_DEFAULT_WEIGHT))
+    total_g_L_s = g_m + g_w
+    total_g_m3_s = total_g_L_s / 1000.0  # m3/s
 
-    target_equilibrium = 420.0 + ((co2_rate * 1500.0) / max(room_volume_m3, 5))
+    # ASHRAE havalandırma axını: 8 L/(s * person) = 0.008 m3/(s * person)
+    total_q_m3_s = max(total_people * 0.004, 0.002) # Təbii/passiv sinif havalandırması
+    c_out_ppm = 415.0 # Çöl havası
 
-    if prev_co2 is None or prev_co2 < 420:
-        prev_co2 = 450.0
+    # Diferensial kütlə tarazlığı inteqralı (dt = 1 saniyə üçün)
+    # dC/dt = (G + Q*C_out - Q*C) / V
+    dt = 1.0
+    c_prev = prev_co2 if prev_co2 is not None else 450.0
+    
+    # Q/V tərsi
+    alpha = total_q_m3_s / room_volume_m3
+    c_inf = c_out_ppm + (total_g_m3_s / total_q_m3_s) * 1e6
+    
+    # Zaman addımı ilə yeni CO2
+    current_co2 = c_inf + (c_prev - c_inf) * math.exp(-alpha * dt)
+    current_co2 += random.uniform(-1.5, 1.5) # Sensor fluktuasiyası
+    current_co2 = max(415.0, min(current_co2, 3000.0))
 
-    drift = (target_equilibrium - prev_co2) * 0.08
-    fluctuation = random.uniform(-12.0, 12.0)
+    # O2 və RQ əlaqəsi (RQ = 0.85 -> VO2 = VCO2 / 0.85)
+    co2_delta = current_co2 - 415.0
+    o2_consumed = (co2_delta / 0.85) / 10000.0
+    current_o2 = round(max(20.95 - o2_consumed, 19.5), 2)
 
-    current_co2 = round(prev_co2 + drift + fluctuation, 1)
-    current_co2 = max(420.0, min(current_co2, 2200.0))
+    return round(current_co2, 1), current_o2
 
-    o2_drop = ((current_co2 - 420.0) / 10_000.0)
-    current_o2 = round(max(20.95 - o2_drop + random.uniform(-0.02, 0.02), 19.2), 2)
+# ==============================================================
+# Elmi IEQ Fokus Skorlama Modeli (ENVIRA & Təhsil Tədqiqatları)
+# IEQ = 0.35*IAQ + 0.30*Thermal + 0.20*Visual + 0.15*Acoustic
+# ==============================================================
+def calculate_ieq_score(co2, temp, lux, db):
+    # 1. IAQ Alt-Skoru (0-100) - ASHRAE 62.1 (<=1000 ppm)
+    if co2 <= 600:
+        s_iaq = 100
+    elif co2 <= 1000:
+        s_iaq = 100 - ((co2 - 600) / 400) * 25
+    elif co2 <= 1600:
+        s_iaq = 75 - ((co2 - 1000) / 600) * 40
+    else:
+        s_iaq = max(35 - ((co2 - 1600) / 800) * 35, 0)
 
-    return current_co2, current_o2
+    # 2. Termal Komfort Alt-Skoru (0-100) - Optimal: 20.8°C - 24.8°C, Kritik: 28°C
+    if 20.8 <= temp <= 24.8:
+        s_therm = 100
+    elif temp < 20.8:
+        s_therm = max(100 - (20.8 - temp) * 12, 20)
+    elif 24.8 < temp <= 28.0:
+        s_therm = 100 - ((temp - 24.8) / 3.2) * 35 # 28°C-də 65 bala enir
+    else:
+        s_therm = max(65 - (temp - 28.0) * 15, 10) # 28°C üstü kəskin eniş
 
-# --- Oflayn Qayda Əsaslı Məsləhət Bankı ---
+    # 3. Vizual Komfort Alt-Skoru (0-100) - Tədris üçün: 500 - 1000 Lux
+    if 500 <= lux <= 1000:
+        s_vis = 100
+    elif lux < 500:
+        s_vis = max((lux / 500) * 100, 20)
+    else:
+        s_vis = max(100 - ((lux - 1000) / 1000) * 40, 40)
+
+    # 4. Akustik Komfort Alt-Skoru (0-100) - Tədris/Zehni norma: <= 40 dBA
+    if db <= 40:
+        s_acou = 100
+    elif db <= 50:
+        s_acou = 100 - ((db - 40) / 10) * 30 # 40-50 dB-də eniş başlayır
+    elif db <= 60:
+        s_acou = 70 - ((db - 50) / 10) * 35
+    else:
+        s_acou = max(35 - ((db - 60) / 20) * 35, 0) # 60+ dB yüksək stress
+
+    # Çəkili Toplam
+    final_ieq = (0.35 * s_iaq) + (0.30 * s_therm) + (0.20 * s_vis) + (0.15 * s_acou)
+    return round(final_ieq, 1)
+
+# --- Oflayn Qayda Əsaslı Elmi Məsləhət Bankı ---
 OFFLINE_EXPERT_RULES = {
-    "co2": "ASHRAE 62.1 həddi aşıldı (>1000 ppm). Karbon qazı beyin qan dövranında oksigeni azaldır. Dərhal pəncərəni açaraq təmiz hava axını yaradın.",
-    "sound": "Akustik küy həddi aşıldı (>70 dB). Qəfil səs partlayışları riyazi və analitik diqqəti 40% zəiflədir. Səs izolyasiyası təmin edin.",
-    "temp": "Termal komfort pozuldu (≥26°C). İstilik artımı zehni yorğunluğu sürətləndirir. Otaq temperaturunu 24°C səviyyəsinə salın.",
-    "light": "Vizual işıqlanma qeyri-kafidir (<500 Lux). Masanın işıqlandırmasını artırın."
+    "co2": "ASHRAE 62.1 norması aşıldı (>1000 ppm). Karbon qazı beyin qan axını və oksigenlənməni azaldır. Dərhal pəncərəni açaraq təmiz hava sirkulyasiyası yaradın.",
+    "sound": "Tədris və fokus üçün kritik fon küyü aşıldı (>40 dBA). Səs küyü işçi yaddaşı və mütaliə dəqiqliyini zəiflədir. Akustik izolyasiya təmin edin.",
+    "temp": "Temperatur kritik həddə çatdı (≥28.0°C). Elmi tədqiqatlara görə bu dərəcədə zehni tapşırıqlarda xəta faizi 5.2% yüksəlir. Otağı sərinlədin (ideal: 20.8–24.8°C).",
+    "light": "Vizual işıqlanma tədris standartından aşağıdır (<500 Lux). Göz yorğunluğunun qarşısını almaq üçün masaüstü işığı artırın."
 }
 
 def get_smart_advice(factor, value, force_offline):
@@ -322,10 +382,10 @@ def get_smart_advice(factor, value, force_offline):
         return OFFLINE_EXPERT_RULES.get(factor, "Mühit normativləri pozuldu. Parametrləri tənzimləyin.")
 
     prompts = {
-        "co2": f"Otaqda CO2 konsentrasiyası {value} ppm oldu və 3 saniyədir yüksəkdir (ASHRAE 62.1 norması 1000 ppm). 1 cümləlik akademik tövsiyə yaz.",
-        "sound": f"Dərs otağında səs küyü {value} dB oldu (Norma <= 70 dB). 1 cümləlik qısa tövsiyə yaz.",
-        "temp": f"Otaq temperaturu {value} °C oldu (24°C ideal). 1 cümləlik tövsiyə ver.",
-        "light": f"İş masasında işıq {value} Lux oldu (Optimal: 500-1000 Lux). 1 cümləlik tövsiyə ver."
+        "co2": f"Sinif/otaqda CO2 göstəricisi {value} ppm oldu (ASHRAE 62.1 həddi 1000 ppm). Elmi əsaslı 1 cümləlik akademik tövsiyə ver.",
+        "sound": f"Fokus tələb edən dərs otağında səs {value} dBA oldu (Elmi fokus həddi maksimum 40 dBA). 1 cümləlik qısa tövsiyə yaz.",
+        "temp": f"Otaq temperaturu {value} °C oldu (Təsdiqlənmiş optimal hədd 20.8-24.8°C, kritik xəta həddi 28°C). 1 cümləlik tövsiyə ver.",
+        "light": f"İş masasında işıqlanma {value} Lux oldu (Optimal tədris norması: 500-1000 Lux). 1 cümləlik tövsiyə ver."
     }
 
     try:
@@ -340,18 +400,18 @@ def get_smart_advice(factor, value, force_offline):
 
 def get_session_summary(duration_str, score, avg_co2, max_db, avg_lux, avg_temp, total_people, force_offline):
     offline_summary = (
-        f"Sessiya {score}/100 fokus balı ilə başa çatdı ({duration_str}). "
-        f"Orta göstəricilər: {avg_co2} ppm CO₂, {avg_temp} °C temperatur və {avg_lux} Lux işıq. "
-        f"ASHRAE 62.1 standartına uyğun təmiz hava dövranını təmin edin."
+        f"Sessiya {score}/100 IEQ Fokus balı ilə başa çatdı ({duration_str}). "
+        f"Orta göstəricilər: {avg_co2} ppm CO₂, {avg_temp} °C temperatur, {avg_lux} Lux işıq və maks {max_db} dBA küy. "
+        f"ASHRAE 62.1 və IEQ təhsil normativlərinə əsasən fasilələrlə otaq havasını təmizləmək tövsiyə olunur."
     )
 
     if force_offline or not client:
         return offline_summary
 
     prompt = f"""
-    Sən fərdi dərs mentorusan. Sessiya yenicə bitdi.
-    Müddət: {duration_str}, Fokus Balı: {score}/100, Orta CO2: {avg_co2} ppm, Maks Küy: {max_db} dB, İşıq: {avg_lux} lx, Temp: {avg_temp} °C.
-    Tələbəyə motivasiyaedici və 1 elmi erqonomik tövsiyə verən maksimum 2 cümlə yaz.
+    Sən elmi IEQ və dərs mentorusan. Sessiya yenicə bitdi.
+    Göstəricilər: Müddət: {duration_str}, IEQ Fokus İndeksi: {score}/100, Orta CO2: {avg_co2} ppm, Maks Küy: {max_db} dBA, İşıq: {avg_lux} lx, Temp: {avg_temp} °C.
+    Tələbəyə elmi daxili mühit standartlarına (optimal 20.8-24.8°C, fon küyü <=40 dBA, CO2 <=1000 ppm) söykənən 2 cümləlik peşəkar təhlil və rəy yaz.
     """
     try:
         response = client.models.generate_content(
@@ -370,8 +430,8 @@ if not st.session_state.session_running:
         st.session_state.session_running = True
         st.session_state.start_time = time.time()
         st.session_state.last_report = None
-        st.session_state.session_penalty = 0.0
         st.session_state.data_history = []
+        st.session_state.ieq_scores_history = []
         st.session_state.trigger_timers = {"co2": 0, "sound": 0, "temp": 0, "light": 0}
         st.session_state.cached_ai_response = None
         st.session_state.last_active_factor = None
@@ -389,18 +449,18 @@ else:
         if st.session_state.data_history:
             df_final = pd.DataFrame(st.session_state.data_history)
             avg_co2 = int(df_final["CO2 (ppm)"].mean())
-            max_db = int(df_final["Səs (dB)"].max())
+            max_db = int(df_final["Səs (dBA)"].max())
             avg_lux = int(df_final["İşıq (Lux)"].mean())
             avg_temp = round(df_final["Temperatur (°C)"].mean(), 1)
             last_co2 = df_final["CO2 (ppm)"].iloc[-1]
+            final_score = int(round(pd.Series(st.session_state.ieq_scores_history).mean()))
         else:
             avg_co2 = 420
-            max_db = 40
-            avg_lux = 500
-            avg_temp = 24.0
+            max_db = 38
+            avg_lux = 600
+            avg_temp = 23.5
             last_co2 = 420.0
-
-        final_score = int(max(100 - st.session_state.session_penalty, 40))
+            final_score = 100
 
         # Google Sheets-ə göndərilməsi (9 dəyər tam ardıcıllıqla)
         sheet_ok = export_to_google_sheets(
@@ -423,7 +483,7 @@ else:
             "Rejim": mode,
             "İştirakçı": total_people,
             "Müddət": total_time_str,
-            "Skor": f"{final_score}/100 ⭐",
+            "IEQ İndeksi": f"{final_score}/100 ⭐",
             "Son CO₂": f"{last_co2} ppm",
             "Ort. Temp": f"{avg_temp} °C"
         })
@@ -442,7 +502,7 @@ else:
 # --- CANLI PANEL ---
 @st.fragment(run_every=1.0 if st.session_state.session_running else None)
 def render_live_dashboard():
-    st.markdown(f'<div class="section-title">📊 Canlı Göstəricilər ({total_people} Nəfər)</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-title">📊 Canlı Göstəricilər ({total_people} Nəfər | Tələbə İstilik Yükü: {total_people * 100} W)</div>', unsafe_allow_html=True)
     k1, k2, k3, k4, k5 = st.columns(5)
 
     if st.session_state.session_running:
@@ -454,52 +514,59 @@ def render_live_dashboard():
             men_count, men_avg_weight, women_count, women_avg_weight, room_vol, prev_co2
         )
 
-        cur_db = random.randint(75, 85) if (8 <= step % 20 <= 12) else random.randint(38, 44)
-        cur_lux = random.randint(430, 480) if (14 <= step % 25 <= 17) else random.randint(580, 680)
-        cur_temp = round(23.8 + (step * 0.02) + random.uniform(-0.1, 0.1), 1)
+        # 40 dBA elmi həddi əsasında səs modeli (ara-sıra tədris küyü 45-55 dBA)
+        cur_db = random.randint(46, 56) if (10 <= step % 22 <= 14) else random.randint(34, 39)
+        cur_lux = random.randint(430, 480) if (16 <= step % 28 <= 19) else random.randint(580, 680)
+        
+        # 100 W insan istilik yükünün otağa tədrici təsiri (ilkin 22.5°C neytral)
+        heat_increment = (total_people * 0.015) * (step / 30.0)
+        cur_temp = round(22.5 + heat_increment + random.uniform(-0.08, 0.08), 1)
+
+        # Cari saniyəlik IEQ Balı
+        current_ieq_point = calculate_ieq_score(cur_co2, cur_temp, cur_lux, cur_db)
+        st.session_state.ieq_scores_history.append(current_ieq_point)
 
         tt = st.session_state.trigger_timers
 
         if cur_co2 > 1000:
             tt["co2"] += 1
-            st.session_state.session_penalty += 1.0
         else:
             tt["co2"] = 0
 
-        if cur_db > 70:
+        # Elmi səs kritik həddi: 40 dBA
+        if cur_db > 40:
             tt["sound"] += 1
-            st.session_state.session_penalty += 1.0
         else:
             tt["sound"] = 0
 
-        if cur_temp >= 26.0:
+        # Elmi kritik xəta temperaturu: 28.0°C
+        if cur_temp >= 28.0:
             tt["temp"] += 1
-            st.session_state.session_penalty += 0.8
         else:
             tt["temp"] = 0
 
         if cur_lux < 500:
             tt["light"] += 1
-            st.session_state.session_penalty += 0.5
         else:
             tt["light"] = 0
 
         st.session_state.data_history.append({
             "Saniyə": step, 
             "CO2 (ppm)": cur_co2, 
-            "Səs (dB)": cur_db, 
+            "Səs (dBA)": cur_db, 
             "İşıq (Lux)": cur_lux, 
-            "Temperatur (°C)": cur_temp
+            "Temperatur (°C)": cur_temp,
+            "IEQ İndeksi": current_ieq_point
         })
         df_live = pd.DataFrame(st.session_state.data_history)
 
-        k1.metric("CO₂ Səviyyəsi", f"{cur_co2} ppm", delta=f"{round(cur_co2 - 420.0, 1)}")
+        k1.metric("CO₂ Səviyyəsi", f"{cur_co2} ppm", delta=f"{round(cur_co2 - 415.0, 1)}")
         k2.metric("O₂ Balansı", f"{cur_o2} %")
-        k3.metric("Səs Küyü", f"{cur_db} dB")
+        k3.metric("Fon Küyü", f"{cur_db} dBA", delta="Normal" if cur_db <= 40 else "Kritik >40", delta_color="inverse")
         k4.metric("İşıq", f"{cur_lux} Lux")
-        k5.metric("Temperatur", f"{cur_temp} °C", delta=f"{round(cur_temp - 24.0, 1)} °C")
+        k5.metric("Temperatur", f"{cur_temp} °C", delta=f"{round(cur_temp - 24.8, 1)} °C")
 
-        mentor_msg = "🌿 Bütün parametrlər idealdır (CO₂ < 600 ppm, İşıq: 500-1000 lx, Temperatur: ~24°C). Dərin fokus fazasındasınız."
+        mentor_msg = f"🌿 IEQ Fokus İndeksi: {current_ieq_point}/100. Bütün parametrlər elmi komfort zonasındadır (Temp: 20.8-24.8°C, Fon küyü ≤40 dBA, CO₂ ≤1000 ppm)."
 
         active_factor = None
         active_val = None
@@ -525,10 +592,10 @@ def render_live_dashboard():
         if active_factor:
             if active_dur < 3:
                 local_alerts = {
-                    "sound": f"🔊 Səs səviyyəsi yüksəldi ({cur_db} dB) — İzlənilir ({active_dur} san)...",
-                    "co2": f"⚠️ Hava köhnəlir: CO₂ yüksəldi ({cur_co2} ppm) — İzlənilir ({active_dur} san)...",
-                    "temp": f"🌡️ Temperatur yüksəldi ({cur_temp} °C) — İzlənilir ({active_dur} san)...",
-                    "light": f"💡 Masada işıqlanma zəiflədi ({cur_lux} Lux) — İzlənilir ({active_dur} san)..."
+                    "sound": f"🔊 Səs səviyyəsi həddi aşdı ({cur_db} dBA > 40 dBA) — İzlənilir ({active_dur} san)...",
+                    "co2": f"⚠️ Hava köhnəlir: CO₂ yüksəldi ({cur_co2} ppm > 1000 ppm) — İzlənilir ({active_dur} san)...",
+                    "temp": f"🌡️ Kritik temperatur həddi aşıldı ({cur_temp} °C ≥ 28.0°C) — İzlənilir ({active_dur} san)...",
+                    "light": f"💡 İşıqlanma normativdən düşdü ({cur_lux} Lux < 500) — İzlənilir ({active_dur} san)..."
                 }
                 mentor_msg = local_alerts.get(active_factor)
                 if st.session_state.last_active_factor != active_factor:
@@ -540,8 +607,8 @@ def render_live_dashboard():
                     st.session_state.cached_ai_response = advice_text
                     st.session_state.last_active_factor = active_factor
                 
-                label_prefix = "📋 Lokal Qayda" if is_offline_manual else "🤖 AI Məsləhəti"
-                mentor_msg = f"{label_prefix} (Hədd {active_dur} san aşıldı): {st.session_state.cached_ai_response}"
+                label_prefix = "📋 Lokal Elmi Qayda" if is_offline_manual else "🤖 AI Məsləhəti"
+                mentor_msg = f"{label_prefix} (Norma {active_dur} san pozuldu): {st.session_state.cached_ai_response}"
         else:
             st.session_state.cached_ai_response = None
             st.session_state.last_active_factor = None
@@ -561,7 +628,7 @@ def render_live_dashboard():
             <div class="mentor-container">
                 <div class="mentor-header-row">
                     <div class="mentor-header-left">
-                        <h3 class="mentor-title-left">🤖 Mentor</h3>
+                        <h3 class="mentor-title-left">🤖 Mentor (IEQ İndeksi: {current_ieq_point}/100)</h3>
                         <span class="compact-timer-tag">⏱️ Taymer: {timer_text}</span>
                     </div>
                     {status_badge_html}
@@ -573,16 +640,16 @@ def render_live_dashboard():
         )
 
         st.line_chart(
-            df_live.set_index("Saniyə")[["CO2 (ppm)", "Səs (dB)"]],
-            color=["#38BDF8", "#F43F5E"]
+            df_live.set_index("Saniyə")[["CO2 (ppm)", "Səs (dBA)", "IEQ İndeksi"]],
+            color=["#38BDF8", "#F43F5E", "#10B981"]
         )
 
     else:
-        k1.metric("CO₂ Səviyyəsi", "420.0 ppm")
+        k1.metric("CO₂ Səviyyəsi", "415.0 ppm")
         k2.metric("O₂ Balansı", "20.95 %")
-        k3.metric("Səs Küyü", "40 dB")
-        k4.metric("İşıq", "500 Lux")
-        k5.metric("Temperatur", "24.0 °C")
+        k3.metric("Fon Küyü", "35 dBA")
+        k4.metric("İşıq", "600 Lux")
+        k5.metric("Temperatur", "22.5 °C")
 
         status_badge_html = (
             '<span class="status-badge-offline">🟡 Oflayn Rejim (Lokal Məntiq)</span>'
@@ -600,7 +667,7 @@ def render_live_dashboard():
                     </div>
                     {status_badge_html}
                 </div>
-                <p class="mentor-msg-text">Sistem gözləmədədir. Sessiya başladılan kimi canlı analitika və mentor tövsiyələri aktivləşəcək.</p>
+                <p class="mentor-msg-text">Sistem gözləmədədir. Sessiya başladılan kimi elmi IEQ inteqrasiyalı canlı monitorinq aktivləşəcək.</p>
             </div>
             """,
             unsafe_allow_html=True
@@ -621,10 +688,10 @@ if st.session_state.last_report and not st.session_state.session_running:
 
     r1, r2 = st.columns([3, 7])
     with r1:
-        st.metric("Fokus Skoru", f"{rep['score']} / 100")
+        st.metric("IEQ Fokus Skoru", f"{rep['score']} / 100")
         st.caption(f"Fokus müddəti: {rep['time']}")
     with r2:
-        st.info(f"**Mentor Yekun Təhlili:**\n\n{rep['feedback']}")
+        st.info(f"**Mentor Yekun Elmi Təhlili:**\n\n{rep['feedback']}")
 
 # --- Fokus Tarixçəsi Cədvəli ---
 st.markdown("---")
@@ -635,6 +702,7 @@ with h_col2:
     st.markdown('<div class="clear-btn">', unsafe_allow_html=True)
     if st.button("🗑️ Tarixçəni Təmizlə", use_container_width=True):
         st.session_state.focus_history = []
+        st.session_state.ieq_scores_history = []
         st.session_state.last_report = None
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
