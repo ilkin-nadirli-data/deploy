@@ -233,24 +233,28 @@ is_offline_manual = (system_mode == "🟡 Oflayn (Lokal Qaydalar)")
 st.sidebar.markdown("---")
 mode = st.sidebar.radio("Otaq Formatı:", ["👤 Fərdi Kabinə (1 nəfər)", "👥 Qrup Otağı (Çox nəfərlik)"])
 
-MEN_AVG_WEIGHT = 75
-WOMEN_AVG_WEIGHT = 62
+MEN_DEFAULT_WEIGHT = 75
+WOMEN_DEFAULT_WEIGHT = 60
 
 if mode == "👤 Fərdi Kabinə (1 nəfər)":
-    total_people = 1
     gender = st.sidebar.selectbox("Cins:", ["Kişi", "Qadın"])
+    weight = st.sidebar.number_input("Çəki (kq)", 40, 130, 75)
     men_count = 1 if gender == "Kişi" else 0
     women_count = 1 if gender == "Qadın" else 0
-    men_avg_weight = MEN_AVG_WEIGHT if men_count else 0
-    women_avg_weight = WOMEN_AVG_WEIGHT if women_count else 0
+    men_avg_weight = weight if men_count else 0
+    women_avg_weight = weight if women_count else 0
+    total_people = 1
     default_vol = 8
 else:
-    # Qrup otağında yalnız ümumi say seçilir, arxa planda bölünür
-    total_people = st.sidebar.number_input("İştirakçı Sayı", min_value=2, max_value=30, value=4, step=1)
-    men_count = math.ceil(total_people / 2)
-    women_count = total_people - men_count
-    men_avg_weight = MEN_AVG_WEIGHT
-    women_avg_weight = WOMEN_AVG_WEIGHT
+    col_m, col_w = st.sidebar.columns(2)
+    with col_m:
+        men_count = st.number_input("Kişi sayı", 0, 30, 2)
+        men_avg_weight = st.number_input("Kişi orta çəki (kq)", 40, 120, MEN_DEFAULT_WEIGHT)
+    with col_w:
+        women_count = st.number_input("Qadın sayı", 0, 30, 2)
+        women_avg_weight = st.number_input("Qadın orta çəki (kq)", 40, 120, WOMEN_DEFAULT_WEIGHT)
+    
+    total_people = max(men_count + women_count, 1)
     default_vol = 25
 
 room_vol = st.sidebar.number_input("Otaq Həcmi (m³)", 3, 300, default_vol)
@@ -258,7 +262,7 @@ room_vol = st.sidebar.number_input("Otaq Həcmi (m³)", 3, 300, default_vol)
 st.sidebar.markdown("---")
 
 # ==============================================================
-# Google Sheets Webhook İnteqrasiyası (YENİ LİNK)
+# Google Sheets Webhook İnteqrasiyası
 # ==============================================================
 WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbyRW0AZquTlgSM51-LR96vausUQ5_lIirM-5For6OprXfUH-CkZEbaWMwk35TTEcdLWLA/exec"
 
@@ -645,4 +649,4 @@ else:
         </div>
         """,
         unsafe_allow_html=True
-    )    
+    )
